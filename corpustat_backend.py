@@ -1,8 +1,9 @@
 """
-CorpuStat Backend — Flask API v2.0
+Osteovera Backend — Flask API v2.0
 ====================================
-Rebranded from FreeDisc. Adds:
-  - Subscription tiers: free | academic | institutional
+Forensic biological profile estimation platform.
+Includes:
+  - Subscription tiers: free | academic | professional | institutional
   - Tier enforcement on save/export endpoints
   - Offline sync: POST /sync — batch upsert cases from local SQLite
   - ONNX inference endpoint: POST /classify
@@ -14,11 +15,11 @@ Deploy to Railway:
   1. Push this folder to GitHub
   2. New Railway project → Deploy from GitHub
   3. Set environment variables (see bottom of file)
-  4. Railway gives you a URL → set CORPUSTAT_API in the HTML
+  4. Railway gives you a URL → set API in the HTML
 
 Run locally:
   pip install -r requirements.txt
-  python corpustat_backend.py
+  python osteovera_backend.py
 """
 
 from flask import Flask, request, jsonify, send_file
@@ -45,9 +46,6 @@ except ImportError:
     ONNX_AVAILABLE = False
 
 # ── Forensic case encryption (AES-256-GCM) ───────────────────────────────────
-# Forensic case measurements and results are encrypted at rest.
-# The encryption key is derived from SECRET_KEY — only the server can decrypt.
-# Even if the database is compromised, case data is unreadable without the key.
 import base64, hashlib
 
 def _get_encryption_key():
@@ -61,14 +59,12 @@ def encrypt_case_data(data_dict):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         import os
         key    = _get_encryption_key()
-        nonce  = os.urandom(12)       # 96-bit random nonce
+        nonce  = os.urandom(12)
         aes    = AESGCM(key)
         plain  = json.dumps(data_dict).encode('utf-8')
         cipher = aes.encrypt(nonce, plain, None)
-        # Store as base64(nonce + ciphertext)
         return base64.b64encode(nonce + cipher).decode('utf-8')
-    except Exception as e:
-        # Fallback: store plain JSON if cryptography not available
+    except Exception:
         return json.dumps(data_dict)
 
 def decrypt_case_data(stored):
@@ -83,34 +79,32 @@ def decrypt_case_data(stored):
         plain  = aes.decrypt(nonce, cipher, None)
         return json.loads(plain.decode('utf-8'))
     except Exception:
-        # Fallback: try plain JSON (backwards compat / missing cryptography)
         try:
             return json.loads(stored)
         except Exception:
             return {}
 
 def is_encrypted(stored):
-    """Check if a stored string is encrypted (base64) vs plain JSON."""
     try:
         json.loads(stored)
-        return False   # valid JSON = not encrypted
+        return False
     except Exception:
-        return True    # not valid JSON = encrypted
+        return True
 
 app = Flask(__name__)
-CORS(app, origins='*')  # Allow all origins — tighten to corpustat.com once live
+CORS(app, origins='*')  # Tighten to osteovera.com once live
 
 app.config.update(
     SECRET_KEY               = os.environ.get('SECRET_KEY', 'change-me-in-production'),
     JWT_SECRET_KEY           = os.environ.get('JWT_SECRET_KEY', 'jwt-change-me'),
-    JWT_ACCESS_TOKEN_EXPIRES = timedelta(days=30),   # 30 days for field use
-    SQLALCHEMY_DATABASE_URI  = os.environ.get('DATABASE_URL', 'sqlite:///corpustat.db'),
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(days=30),
+    SQLALCHEMY_DATABASE_URI  = os.environ.get('DATABASE_URL', 'sqlite:///osteovera.db'),
     SQLALCHEMY_TRACK_MODIFICATIONS = False,
 )
 
-ADMIN_TOKEN  = os.environ.get('ADMIN_TOKEN',  'admin-change-me')
-STRIPE_SECRET= os.environ.get('STRIPE_SECRET_KEY', '')
-STRIPE_WHSEC = os.environ.get('STRIPE_WEBHOOK_SECRET', '')
+ADMIN_TOKEN   = os.environ.get('ADMIN_TOKEN',  'admin-change-me')
+STRIPE_SECRET = os.environ.get('STRIPE_SECRET_KEY', '')
+STRIPE_WHSEC  = os.environ.get('STRIPE_WEBHOOK_SECRET', '')
 
 db  = SQLAlchemy(app)
 jwt = JWTManager(app)
@@ -119,10 +113,10 @@ jwt = JWTManager(app)
 # ── Tier limits ──────────────────────────────────────────────────────────────
 
 TIER_LIMITS = {
-    'free':           {'max_cases': 0,     'export': False, 'pdf': False, 'templates': False},
-    'academic':       {'max_cases': 200,   'export': True,  'pdf': True,  'templates': False},
-    'professional':   {'max_cases': 1000,  'export': True,  'pdf': True,  'templates': True},
-    'institutional':  {'max_cases': 99999, 'export': True,  'pdf': True,  'templates': True},
+    'free':          {'max_cases': 0,     'export': False, 'pdf': False, 'templates': False},
+    'academic':      {'max_cases': 200,   'export': True,  'pdf': True,  'templates': False},
+    'professional':  {'max_cases': 1000,  'export': True,  'pdf': True,  'templates': True},
+    'institutional': {'max_cases': 99999, 'export': True,  'pdf': True,  'templates': True},
 }
 
 
@@ -134,7 +128,6 @@ class User(db.Model):
     email            = db.Column(db.String(120), unique=True,  nullable=False)
     password_hash    = db.Column(db.String(256), nullable=False)
 
-    # Profile
     full_name        = db.Column(db.String(200), default='')
     title            = db.Column(db.String(100), default='')
     affiliation      = db.Column(db.String(300), default='')
@@ -146,13 +139,10 @@ class User(db.Model):
     contact_ok       = db.Column(db.Boolean,     default=False)
     country          = db.Column(db.String(100), default='')
 
-    # Subscription
-    # free | academic | institutional
     tier             = db.Column(db.String(30),  default='free')
     tier_expires_at  = db.Column(db.DateTime,    nullable=True)
     stripe_customer  = db.Column(db.String(100), default='')
 
-    # Usage tracking
     created_at       = db.Column(db.DateTime, default=datetime.utcnow)
     last_login       = db.Column(db.DateTime, default=datetime.utcnow)
     login_count      = db.Column(db.Integer,  default=0)
@@ -163,12 +153,12 @@ class User(db.Model):
     activity_logs    = db.relationship('ActivityLog', backref='user',  lazy=True,
                                        cascade='all, delete-orphan')
 
-    def set_password(self, pw):     self.password_hash = generate_password_hash(pw)
-    def check_password(self, pw):   return check_password_hash(self.password_hash, pw)
+    def set_password(self, pw):   self.password_hash = generate_password_hash(pw)
+    def check_password(self, pw): return check_password_hash(self.password_hash, pw)
 
     def effective_tier(self):
         """Return current tier. TESTING MODE: all registered users get institutional."""
-        # ── TESTING MODE — remove this block before public launch ──────────
+        # ── TESTING MODE — remove before public launch ──────────────────────
         TESTING_MODE = True
         if TESTING_MODE and self.id:
             return 'institutional'
@@ -205,20 +195,20 @@ class ActivityLog(db.Model):
 
 
 class Project(db.Model):
-    id               = db.Column(db.String(36), primary_key=True,
-                                 default=lambda: str(uuid.uuid4()))
-    name             = db.Column(db.String(200), nullable=False)
-    description      = db.Column(db.Text,  default='')
-    created_at       = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at       = db.Column(db.DateTime, default=datetime.utcnow,
-                                 onupdate=datetime.utcnow)
-    user_id          = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    id                    = db.Column(db.String(36), primary_key=True,
+                                      default=lambda: str(uuid.uuid4()))
+    name                  = db.Column(db.String(200), nullable=False)
+    description           = db.Column(db.Text,  default='')
+    created_at            = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at            = db.Column(db.DateTime, default=datetime.utcnow,
+                                      onupdate=datetime.utcnow)
+    user_id               = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     data_description      = db.Column(db.Text,    default='')
     data_consent_confirmed= db.Column(db.Boolean, default=False)
     data_provenance       = db.Column(db.String(100), default='')
     data_provenance_other = db.Column(db.String(300), default='')
-    runs             = db.relationship('Run', backref='project', lazy=True,
-                                       cascade='all, delete-orphan')
+    runs                  = db.relationship('Run', backref='project', lazy=True,
+                                            cascade='all, delete-orphan')
 
     def to_dict(self, include_runs=False):
         d = dict(id=self.id, name=self.name, description=self.description,
@@ -243,17 +233,13 @@ class Run(db.Model):
     results      = db.Column(db.Text, default='{}')
     notes        = db.Column(db.Text, default='')
     created_at   = db.Column(db.DateTime, default=datetime.utcnow)
-    # Case classification
     case_type    = db.Column(db.String(30),  default='')
     case_number  = db.Column(db.String(60),  default='')
-    # Encryption flag — forensic cases have measurements+results encrypted at rest
     is_encrypted = db.Column(db.Boolean, default=False)
-    # Offline sync fields
     client_id    = db.Column(db.String(36), unique=True, nullable=True)
     synced_at    = db.Column(db.DateTime,   nullable=True)
 
     def to_dict(self):
-        # Decrypt measurements and results if stored encrypted
         if self.is_encrypted:
             meas = decrypt_case_data(self.measurements or '{}')
             res  = decrypt_case_data(self.results or '{}')
@@ -265,8 +251,7 @@ class Run(db.Model):
                     case_type=self.case_type or '',
                     case_number=self.case_number or '',
                     is_encrypted=bool(self.is_encrypted),
-                    measurements=meas,
-                    results=res,
+                    measurements=meas, results=res,
                     created_at=self.created_at.isoformat(),
                     synced_at=self.synced_at.isoformat() if self.synced_at else None)
 
@@ -282,34 +267,30 @@ def _log(user_id, event_type, event_data=None):
     except Exception:
         db.session.rollback()
 
-
 def _get_user():
     return User.query.get(int(get_jwt_identity()))
-
 
 def _check_tier(user, feature):
     limits = TIER_LIMITS[user.effective_tier()]
     if feature == 'save_case':
         case_count = sum(len(p.runs) for p in user.projects)
         return case_count < limits['max_cases'], limits['max_cases']
-    if feature == 'export':
-        return limits['export'], None
-    if feature == 'pdf':
-        return limits['pdf'], None
+    if feature == 'export': return limits['export'], None
+    if feature == 'pdf':    return limits['pdf'],    None
     return True, None
 
 
 # ── Privacy notice ────────────────────────────────────────────────────────────
 
 PRIVACY_NOTICE = """
-CorpuStat collects and stores the following data about registered users:
+Osteovera collects and stores the following data about registered users:
 (1) Account details: email, username, name, title, affiliation, role, and use context.
 (2) Usage data: login timestamps and counts, session duration, and feature usage.
 (3) Case data: measurements and classification results you explicitly save to projects.
 
 This data is used to improve the platform and understand how it is used in research and practice.
 It is not shared with third parties and is not used for advertising.
-You may request deletion of your account at any time by contacting niev@corpustat.com.
+You may request deletion of your account at any time by contacting niev@osteovera.com.
 
 If you save cases containing measurements from human individuals, you confirm that:
 (a) Data were collected under appropriate ethical oversight (IRB, REC, or equivalent).
@@ -325,7 +306,7 @@ def privacy():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify(status='ok', version='2.0', service='CorpuStat')
+    return jsonify(status='ok', version='2.0', service='Osteovera')
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -346,19 +327,19 @@ def register():
         return jsonify(error='That username is already taken'), 409
 
     u = User(
-        username          = data['username'].strip(),
-        email             = data['email'].lower().strip(),
-        full_name         = data.get('full_name', '').strip(),
-        title             = data.get('title', '').strip(),
-        affiliation       = data.get('affiliation', '').strip(),
-        role              = data.get('role', '').strip(),
-        use_context       = json.dumps(data.get('use_context', [])),
-        use_purpose       = json.dumps(data.get('use_purpose', [])),
-        contact_ok        = bool(data.get('contact_ok', False)),
-        country           = data.get('country', '').strip(),
-        tier              = 'free',
-        login_count       = 1,
-        last_login        = datetime.utcnow(),
+        username   = data['username'].strip(),
+        email      = data['email'].lower().strip(),
+        full_name  = data.get('full_name', '').strip(),
+        title      = data.get('title', '').strip(),
+        affiliation= data.get('affiliation', '').strip(),
+        role       = data.get('role', '').strip(),
+        use_context= json.dumps(data.get('use_context', [])),
+        use_purpose= json.dumps(data.get('use_purpose', [])),
+        contact_ok = bool(data.get('contact_ok', False)),
+        country    = data.get('country', '').strip(),
+        tier       = 'free',
+        login_count= 1,
+        last_login = datetime.utcnow(),
     )
     u.set_password(data['password'])
     db.session.add(u)
@@ -433,7 +414,7 @@ def record_session():
 @app.route('/projects', methods=['GET'])
 @jwt_required()
 def list_projects():
-    u = _get_user()
+    u  = _get_user()
     ps = sorted(u.projects, key=lambda x: x.updated_at, reverse=True)
     return jsonify(projects=[p.to_dict() for p in ps])
 
@@ -496,28 +477,27 @@ def create_run(pid):
     if p.user_id != int(get_jwt_identity()): return jsonify(error='Forbidden'), 403
     u = _get_user()
 
-    # Tier check
     can_save, limit = _check_tier(u, 'save_case')
     if not can_save:
         return jsonify(error=f'Free tier does not include case saving. '
                              f'Upgrade to Academic to save up to {limit} cases.'), 403
 
-    data = request.json or {}
-    case_type   = data.get('case_type', '')
-    meas_raw    = data.get('measurements', {})
-    results_raw = data.get('results', {})
-    forensic    = case_type == 'forensic'
+    data      = request.json or {}
+    case_type = data.get('case_type', '')
+    meas_raw  = data.get('measurements', {})
+    res_raw   = data.get('results', {})
+    forensic  = case_type == 'forensic'
 
     r = Run(project_id=pid,
-            label=data.get('label', ''),
-            measurements=encrypt_case_data(meas_raw) if forensic else json.dumps(meas_raw),
-            results=encrypt_case_data(results_raw)   if forensic else json.dumps(results_raw),
-            notes=data.get('notes', ''),
-            case_type=case_type,
-            case_number=data.get('case_number', ''),
-            is_encrypted=forensic,
-            client_id=data.get('client_id'),
-            synced_at=datetime.utcnow())
+            label       = data.get('label', ''),
+            measurements= encrypt_case_data(meas_raw) if forensic else json.dumps(meas_raw),
+            results     = encrypt_case_data(res_raw)  if forensic else json.dumps(res_raw),
+            notes       = data.get('notes', ''),
+            case_type   = case_type,
+            case_number = data.get('case_number', ''),
+            is_encrypted= forensic,
+            client_id   = data.get('client_id'),
+            synced_at   = datetime.utcnow())
     db.session.add(r)
     p.updated_at = datetime.utcnow()
     db.session.commit()
@@ -540,7 +520,6 @@ def get_run(rid):
     r = Run.query.get_or_404(rid)
     p = Project.query.get(r.project_id)
     if p.user_id != int(get_jwt_identity()): return jsonify(error='Forbidden'), 403
-    # Audit log every forensic case access
     if r.case_type == 'forensic':
         _log(int(get_jwt_identity()), 'forensic_case_accessed',
              {'run_id': rid, 'case_number': r.case_number or '',
@@ -571,48 +550,35 @@ def export_run_json(rid):
         return jsonify(error='Upgrade to Academic tier to export cases.'), 403
     buf = io.BytesIO(json.dumps(r.to_dict(), indent=2).encode())
     return send_file(buf, mimetype='application/json', as_attachment=True,
-                     download_name=f'corpustat_run_{rid[:8]}.json')
+                     download_name=f'osteovera_run_{rid[:8]}.json')
 
 
-# ── Offline sync endpoint ─────────────────────────────────────────────────────
+# ── Offline sync ──────────────────────────────────────────────────────────────
 
 @app.route('/sync', methods=['POST'])
 @jwt_required()
 def sync_cases():
-    """
-    Receives a batch of cases created offline on the client device.
-    Body: { "cases": [ { "client_id": "...", "project_name": "...",
-                          "label": "...", "measurements": {}, "results": {},
-                          "notes": "", "created_at": "ISO" } ] }
-    Returns: { "synced": [...server_ids...], "errors": [...] }
-    Creates projects automatically if they don't exist.
-    Skips cases whose client_id already exists (idempotent).
-    Tier-checks total case count before accepting the batch.
-    """
     u = _get_user()
     if not u: return jsonify(error='Not found'), 404
 
-    data       = request.json or {}
-    cases_in   = data.get('cases', [])
-    synced     = []
-    errors     = []
-    proj_cache = {}   # project_name → Project
-
+    data          = request.json or {}
+    cases_in      = data.get('cases', [])
+    synced        = []
+    errors        = []
+    proj_cache    = {}
     can_save, limit = _check_tier(u, 'save_case')
-    current_count   = sum(len(p.runs) for p in u.projects)
+    current_count = sum(len(p.runs) for p in u.projects)
 
     for case in cases_in:
         client_id = case.get('client_id')
         if client_id and Run.query.filter_by(client_id=client_id).first():
             synced.append({'client_id': client_id, 'status': 'already_synced'})
             continue
-
         if not can_save or current_count >= (limit or 0):
             errors.append({'client_id': client_id,
                            'error': 'Case limit reached for your tier'})
             continue
 
-        # Find or create project
         pname = case.get('project_name', 'Field Cases')
         if pname not in proj_cache:
             existing = next((p for p in u.projects if p.name == pname), None)
@@ -625,10 +591,9 @@ def sync_cases():
             proj_cache[pname] = existing
 
         proj = proj_cache[pname]
-
         try:
-            created_at = datetime.fromisoformat(case.get('created_at',
-                                                datetime.utcnow().isoformat()))
+            created_at = datetime.fromisoformat(
+                case.get('created_at', datetime.utcnow().isoformat()))
         except ValueError:
             created_at = datetime.utcnow()
 
@@ -637,7 +602,7 @@ def sync_cases():
         sync_meas      = case.get('measurements', {})
         sync_results   = case.get('results', {})
 
-        r = Run(project_id=proj.id,
+        r = Run(project_id = proj.id,
                 label       = case.get('label', ''),
                 measurements= encrypt_case_data(sync_meas)    if sync_forensic else json.dumps(sync_meas),
                 results     = encrypt_case_data(sync_results) if sync_forensic else json.dumps(sync_results),
@@ -667,12 +632,6 @@ def sync_cases():
 @app.route('/classify', methods=['POST'])
 @jwt_required()
 def classify():
-    """
-    Runs inference via ONNX models if weights are available.
-    Falls back to a message directing the client to use local inference.
-    Body: { "measurements": { "GOL": 185, ... }, "sex_estimate": 0.7,
-            "fingerprint": { "SameAVG": 0.48, "Diff1": 0.45, ... } }
-    """
     if not ONNX_AVAILABLE:
         return jsonify(error='ONNX runtime not available. '
                              'Use local browser inference.'), 503
@@ -681,15 +640,13 @@ def classify():
     except ImportError:
         return jsonify(error='numpy not available.'), 503
 
-    data  = request.json or {}
-    meas  = data.get('measurements', {})
-    fp    = data.get('fingerprint', {})
+    data    = request.json or {}
+    fp      = data.get('fingerprint', {})
     results = {}
 
-    # ── Fingerprint age (if model file present) ───────────────────────────
     model_path = 'models/mlp_fingerprint.onnx'
     if fp.get('SameAVG') and os.path.exists(model_path):
-        sess = ort.InferenceSession(model_path)  # ort imported via ONNX_AVAILABLE check
+        sess     = ort.InferenceSession(model_path)
         same_avg = float(fp['SameAVG'])
         sex      = float(data.get('sex_for_fingerprint', 0.5))
         feat = np.array([[same_avg,
@@ -702,13 +659,11 @@ def classify():
                           float(np.log(same_avg + 1e-6)),
                           same_avg ** 2,
                           sex * same_avg,
-                          0.0]],   # phase placeholder
-                        dtype=np.float32)
+                          0.0]], dtype=np.float32)
         age_pred = float(sess.run(None, {sess.get_inputs()[0].name: feat})[0][0])
         results['fingerprint_age_mlp'] = round(age_pred, 2)
 
-    _log(int(get_jwt_identity()), 'server_classify',
-         {'modules': list(results.keys())})
+    _log(int(get_jwt_identity()), 'server_classify', {'modules': list(results.keys())})
     return jsonify(results=results)
 
 
@@ -750,12 +705,13 @@ def stripe_webhook():
     """
     Handles Stripe subscription events to update user tiers.
     Set STRIPE_WEBHOOK_SECRET in environment variables.
-    In Stripe dashboard → Webhooks → add endpoint: https://api.corpustat.com/stripe/webhook
-    Events to listen for: customer.subscription.created, updated, deleted
+    In Stripe dashboard → Webhooks → add endpoint:
+      https://osteovera-backend-production.up.railway.app/stripe/webhook
+    Events to listen for:
+      customer.subscription.created, updated, deleted
     """
     if not STRIPE_SECRET:
         return jsonify(error='Stripe not configured'), 503
-
     try:
         import stripe
         stripe.api_key = STRIPE_SECRET
@@ -765,27 +721,21 @@ def stripe_webhook():
     except Exception as e:
         return jsonify(error=str(e)), 400
 
-    sub  = event['data']['object']
-    etype= event['type']
-    cust = sub.get('customer', '')
-
-    u = User.query.filter_by(stripe_customer=cust).first()
+    sub   = event['data']['object']
+    etype = event['type']
+    cust  = sub.get('customer', '')
+    u     = User.query.filter_by(stripe_customer=cust).first()
     if not u:
-        return jsonify(ok=True)  # unknown customer, ignore
+        return jsonify(ok=True)
 
     if etype in ('customer.subscription.created', 'customer.subscription.updated'):
         plan_name = sub['items']['data'][0]['price']['nickname'].lower()
-        if 'institutional' in plan_name:
-            u.tier = 'institutional'
-        elif 'professional' in plan_name:
-            u.tier = 'professional'
-        elif 'academic' in plan_name:
-            u.tier = 'academic'
-        # Set expiry to end of current period
+        if   'institutional' in plan_name: u.tier = 'institutional'
+        elif 'professional'  in plan_name: u.tier = 'professional'
+        elif 'academic'      in plan_name: u.tier = 'academic'
         import time
         u.tier_expires_at = datetime.utcfromtimestamp(
             sub.get('current_period_end', time.time() + 86400*365))
-
     elif etype == 'customer.subscription.deleted':
         u.tier            = 'free'
         u.tier_expires_at = None
@@ -798,55 +748,44 @@ def stripe_webhook():
 
 @app.route('/admin/set-tier', methods=['POST'])
 def admin_set_tier():
-    """
-    Manually set a user's tier. Admin only.
-    Body: { "email": "user@example.com", "tier": "academic" }
-    Header: X-Admin-Token: your_admin_token
-    """
-    tok = request.headers.get('X-Admin-Token', '')
-    if tok != ADMIN_TOKEN:
+    if request.headers.get('X-Admin-Token', '') != ADMIN_TOKEN:
         return jsonify(error='Forbidden'), 403
-    data = request.json or {}
+    data  = request.json or {}
     email = data.get('email', '').lower().strip()
     tier  = data.get('tier', '').lower().strip()
     if tier not in ('free', 'academic', 'professional', 'institutional'):
         return jsonify(error=f'Invalid tier: {tier}'), 400
     u = User.query.filter_by(email=email).first()
-    if not u:
-        return jsonify(error=f'No user found with email: {email}'), 404
+    if not u: return jsonify(error=f'No user found: {email}'), 404
     u.tier = tier
-    # Set expiry 1 year from now for paid tiers
     if tier != 'free':
-        from datetime import timedelta
         u.tier_expires_at = datetime.utcnow() + timedelta(days=365)
     else:
         u.tier_expires_at = None
     db.session.commit()
-    _log(u.id, 'admin_tier_change', {'tier': tier, 'admin': True})
+    _log(u.id, 'admin_tier_change', {'tier': tier})
     return jsonify(ok=True, user=u.profile_dict())
 
 
 @app.route('/admin/users', methods=['GET'])
 def admin_list_users():
-    """List all users with their tiers. Admin only."""
-    tok = request.headers.get('X-Admin-Token', '')
-    if tok != ADMIN_TOKEN:
+    if request.headers.get('X-Admin-Token', '') != ADMIN_TOKEN:
         return jsonify(error='Forbidden'), 403
     users = User.query.order_by(User.created_at.desc()).all()
     return jsonify(users=[{
         'id': u.id, 'email': u.email, 'username': u.username,
         'tier': u.effective_tier(), 'created_at': u.created_at.isoformat(),
-        'login_count': u.login_count, 'case_count': sum(len(p.runs) for p in u.projects)
+        'login_count': u.login_count,
+        'case_count': sum(len(p.runs) for p in u.projects)
     } for u in users])
 
 
 @app.route('/admin/stats', methods=['GET'])
 def admin_stats():
-    tok = request.headers.get('X-Admin-Token', '')
-    if tok != ADMIN_TOKEN:
+    if request.headers.get('X-Admin-Token', '') != ADMIN_TOKEN:
         return jsonify(error='Forbidden'), 403
-    users = User.query.all()
-    logs  = ActivityLog.query.all()
+    users        = User.query.all()
+    logs         = ActivityLog.query.all()
     event_counts = Counter(l.event_type for l in logs)
     role_counts  = Counter(u.role or 'unspecified' for u in users)
     tier_counts  = Counter(u.effective_tier() for u in users)
@@ -858,22 +797,20 @@ def admin_stats():
     for u in users:
         if u.created_at:
             by_month[u.created_at.strftime('%Y-%m')] += 1
-    # Count forensic cases
-    all_runs = Run.query.all()
+    all_runs       = Run.query.all()
     forensic_count = sum(1 for r in all_runs if r.case_type == 'forensic')
-
     return jsonify(
-        total_users       = len(users),
-        total_cases       = len(all_runs),
-        forensic_cases    = forensic_count,
-        total_logins      = sum(u.login_count or 0 for u in users),
-        total_time_hours  = round(sum(u.total_time_secs or 0 for u in users) / 3600, 1),
-        contact_ok_count  = sum(1 for u in users if u.contact_ok),
-        tier_breakdown    = dict(tier_counts),
-        event_counts      = dict(event_counts),
-        role_breakdown    = dict(role_counts),
+        total_users           = len(users),
+        total_cases           = len(all_runs),
+        forensic_cases        = forensic_count,
+        total_logins          = sum(u.login_count or 0 for u in users),
+        total_time_hours      = round(sum(u.total_time_secs or 0 for u in users)/3600, 1),
+        contact_ok_count      = sum(1 for u in users if u.contact_ok),
+        tier_breakdown        = dict(tier_counts),
+        event_counts          = dict(event_counts),
+        role_breakdown        = dict(role_counts),
         use_context_breakdown = dict(ctx_counts),
-        users_by_month    = dict(sorted(by_month.items())),
+        users_by_month        = dict(sorted(by_month.items())),
     )
 
 
@@ -885,7 +822,7 @@ with app.app_context():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5050))
-    print(f'CorpuStat backend v2.0 on http://localhost:{port}')
+    print(f'Osteovera backend v2.0 on http://localhost:{port}')
     app.run(debug=True, port=port)
 
 
@@ -893,20 +830,24 @@ if __name__ == '__main__':
 ═══════════════════════════════════════════════════════════════════
 RAILWAY ENVIRONMENT VARIABLES (set in Railway dashboard):
 ═══════════════════════════════════════════════════════════════════
-  SECRET_KEY          = <random 64-char string>
-  JWT_SECRET_KEY      = <different random 64-char string>
-  DATABASE_URL        = <Railway PostgreSQL URL — auto-set if you add PostgreSQL plugin>
-  ADMIN_TOKEN         = <secret token for /admin/stats>
-  STRIPE_SECRET_KEY   = sk_live_... (from Stripe dashboard)
-  STRIPE_WEBHOOK_SECRET = whsec_... (from Stripe webhook settings)
-  PORT                = 8080
+  SECRET_KEY             = <random 64-char string>
+  JWT_SECRET_KEY         = <different random 64-char string>
+  DATABASE_URL           = <Railway PostgreSQL URL — auto-set if you add PostgreSQL plugin>
+  ADMIN_TOKEN            = <secret token for /admin/* endpoints>
+  STRIPE_SECRET_KEY      = sk_live_... (from Stripe dashboard)
+  STRIPE_WEBHOOK_SECRET  = whsec_... (from Stripe webhook settings)
+  PORT                   = 8080
 
 RAILWAY DEPLOYMENT STEPS:
-  1. Push this folder to GitHub repo
+  1. Push this folder to GitHub repo (osteovera)
   2. railway.app → New Project → Deploy from GitHub → select repo
   3. Add PostgreSQL plugin (Railway dashboard → + New → Database → PostgreSQL)
   4. Set environment variables above
-  5. Railway gives you URL: https://corpustat-backend-production.up.railway.app
-  6. In corpustat_app.html: const API = 'https://corpustat-backend-production.up.railway.app'
+  5. Railway gives you URL: https://osteovera-backend-production.up.railway.app
+  6. In index.html line 1231: const API = 'https://osteovera-backend-production.up.railway.app'
+
+STRIPE WEBHOOK:
+  Dashboard → Webhooks → Add endpoint:
+  https://osteovera-backend-production.up.railway.app/stripe/webhook
 ═══════════════════════════════════════════════════════════════════
 """
