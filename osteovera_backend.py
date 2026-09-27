@@ -304,6 +304,18 @@ def privacy():
     return jsonify(notice=PRIVACY_NOTICE)
 
 
+@app.route('/models/cranial', methods=['GET'])
+def cranial_models():
+    """Serve the browser-side cranial sex/affinity model file from the repo's models/ folder."""
+    from flask import send_file
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'osteovera_cranial_models.json')
+    if not os.path.exists(path):
+        return jsonify({'error': 'osteovera_cranial_models.json not found in models/'}), 404
+    resp = send_file(path, mimetype='application/json')
+    resp.headers['Cache-Control'] = 'public, max-age=3600'
+    return resp
+
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify(status='ok', version='2.0', service='Osteovera')
