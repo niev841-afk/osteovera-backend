@@ -644,24 +644,24 @@ def classify():
     fp      = data.get('fingerprint', {})
     results = {}
 
-    model_path = 'models/mlp_fingerprint.onnx'
-    if fp.get('SameAVG') and os.path.exists(model_path):
-        sess     = ort.InferenceSession(model_path)
+    # Fingerprint age: OLS on the Greek pediatric reference (n=200, ages 6-12).
+    # Replaces the earlier ONNX MLP, whose feature vector included a 'phase' slot
+    # derived from true age (label leakage). LOO-CV MAE 1.375 yr (all six values).
+    FULL = [3.4149, 5.5644, 2.1367, 6.0188, -1.4561, -3.3943, 2.1431, -0.1539]   # intercept, SameAVG, Diff1..Diff5, sex(1=M,0=F)
+    SAME = [3.636, 10.571, -0.1514]   # intercept, SameAVG, sex
+    if fp.get('SameAVG'):
         same_avg = float(fp['SameAVG'])
         sex      = float(data.get('sex_for_fingerprint', 0.5))
-        feat = np.array([[same_avg,
-                          fp.get('Diff1', same_avg),
-                          fp.get('Diff2', same_avg),
-                          fp.get('Diff3', same_avg),
-                          fp.get('Diff4', same_avg),
-                          fp.get('Diff5', same_avg),
-                          sex,
-                          float(np.log(same_avg + 1e-6)),
-                          same_avg ** 2,
-                          sex * same_avg,
-                          0.0]], dtype=np.float32)
-        age_pred = float(sess.run(None, {sess.get_inputs()[0].name: feat})[0][0])
-        results['fingerprint_age_mlp'] = round(age_pred, 2)
+        diffs    = [fp.get(f'Diff{k}') for k in range(1, 6)]
+        if all(d not in (None, '') for d in diffs):
+            x = [1.0, same_avg] + [float(d) for d in diffs] + [sex]
+            raw, ci, method = float(np.dot(FULL, x)), 3.25, 'ols_full'
+        else:
+            raw, ci, method = float(np.dot(SAME, [1.0, same_avg, sex])), 3.28, 'ols_sameavg'
+        results['fingerprint_age'] = round(min(15.0, max(4.0, raw)), 2)
+        results['fingerprint_age_ci95'] = ci
+        results['fingerprint_age_method'] = method
+        results['fingerprint_age_extrapolation'] = bool(raw < 6 or raw > 12 or not (0.276 <= same_avg <= 0.808))
 
     _log(int(get_jwt_identity()), 'server_classify', {'modules': list(results.keys())})
     return jsonify(results=results)
