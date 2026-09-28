@@ -583,7 +583,9 @@ def sync_cases():
 
     for case in cases_in:
         client_id = case.get('client_id')
-        if client_id and Run.query.filter_by(client_id=client_id).first():
+        if not client_id:
+            errors.append({'client_id': None, 'error': 'Missing client_id'}); continue
+        if Run.query.filter_by(client_id=client_id).first():
             synced.append({'client_id': client_id, 'status': 'already_synced'})
             continue
         if not can_save or current_count >= (limit or 0):
@@ -591,7 +593,12 @@ def sync_cases():
                            'error': 'Case limit reached for your tier'})
             continue
 
-        pname = case.get('project_name', 'Field Cases')
+        # Prefer the project the user picked (if it is theirs); otherwise file by name.
+        pid_in = case.get('project_id')
+        own = next((p for p in u.projects if pid_in and p.id == pid_in), None)
+        if own:
+            proj_cache[own.name] = own
+        pname = own.name if own else case.get('project_name', 'Field Cases')
         if pname not in proj_cache:
             existing = next((p for p in u.projects if p.name == pname), None)
             if not existing:
